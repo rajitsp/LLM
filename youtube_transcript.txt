@@ -1,0 +1,118 @@
+ SPEAKER 1: Unless you've
+been living under a rock, you've probably heard
+that AI is getting very good at conversation. In fact, maybe you
+even chatted with one of these AI's through a chat
+bot interface like Google Bard. SPEAKER 2: This is all
+thanks to a powerful kind of neural network called a
+Large Language Model, or LLM. LLMs enable computers to
+understand and generate language better
+than ever before, unlocking a whole host
+of new applications. SPEAKER 1: In this
+video, we're going to talk about what LLMs
+are and how anyone can get started building with them,
+whether you're a developer or not. SPEAKER 2: Ready? BOTH: Let's dive in. SPEAKER 1: LLMs are
+machine learning models that are really good at
+understanding and generating human language. They're based on transformers,
+a type of neural network architecture invented by Google. Now, what made the transformer
+architecture so powerful was its ability to
+scale effectively, allowing us to train these
+models on massive text datasets. SPEAKER 2: That's where the
+"large" in large language models comes from-- both the size and complexity
+of the neural network itself, as well as the size of the
+dataset that it was trained on. For some of these
+models, we're talking about trillions of
+tokens from a bunch of publicly available sources. And it wasn't until
+researchers started to make these
+models really large and train them on
+these huge datasets that they started showing
+these impressive results, like understanding complex,
+nuanced language and generating language more
+eloquently than ever. SPEAKER 1: If you're already
+familiar with machine learning, you probably think
+about training a model for a
+specific task, like is this tweet positive or
+negative, or translate this text from French to English. What makes LLMs
+especially powerful is that one model can be used
+for a whole variety of tasks, like chat, copywriting,
+translation, summarization, brainstorming, code generation,
+and a whole lot more. SPEAKER 2: Best of all, you can
+prototype language applications incredibly fast with LLMs-- in just minutes,
+rather than months. And you don't have to be
+a machine learning expert to do it. All you really need to
+know is how to write. So how do you
+actually use an LLM? Well, let's take a look. LLMs learn about
+patterns and language from the massive amounts of
+text data they're trained on. Then they take as
+input some text and produce some output text
+that's likely to follow. SPEAKER 1: Another
+way to say this is that LLMs are like really
+sophisticated autocomplete. So for example, if we
+give an LLM the input-- SPEAKER 2: It's
+raining cats and-- SPEAKER 1: It'll probably
+predict that "dogs" is the most likely word to follow. Now, this might not
+seem that exciting, but we can actually use this
+autocomplete-like functionality to solve tons of tasks just by
+writing strategic text input. SPEAKER 2: For example,
+let's take Google's PaLM LLM and input this sentence. SPEAKER 1: I have two
+apples and I eat one. I'm left with-- SPEAKER 2: The PaLM model
+outputs the answer "one." In this way, we get the LLM
+to perform some simple math. SPEAKER 1: Or take
+another example. SPEAKER 2: Paris is to
+France as Tokyo is to-- SPEAKER 1: The PaLM model
+outputs "Japan," which tells us that the model can not
+only complete analogies, but it also has some
+world knowledge that it's learned from its training data. So I should add the
+caveat that not all of the knowledge
+that the LLM outputs is necessarily
+factually accurate. SPEAKER 2: Now, all of the
+text that we feed into an LLM as input is called a
+prompt, and it turns out there's this whole art known
+as prompt design, which is about figuring out
+how to write and format prompt text to get LLMs
+to do what you want. SPEAKER 1: For example,
+one way to structure a prompt is as an
+instruction, like-- SPEAKER 2: Write me a
+poem about Ada Lovelace in the style of Shakespeare. SPEAKER 1: Or explain quantum
+physics to me like I'm five. SPEAKER 2: Or generate
+a list of items I need for a camping trip
+to Yosemite National Park. SPEAKER 1: This approach--
+using a single command to get an LLM to
+take on a behavior-- is called zero shot learning. But in addition to just
+providing an instruction, it can be helpful to
+show the model what you want by adding examples. This is called few shot
+learning because we showed the model a few examples. Like here's a prompt for
+translating from English to French. First we provide an instruction. Then we give some examples,
+establishing the text pattern. If we pass this prompt
+to an LLM like PaLM, we get back something
+like the following. SPEAKER 2: The model did
+provide a French translation of lipstick, but you might
+notice that it went on to generate all these additional
+English-French translation pairs. This might seem a
+little unexpected, but the LLM is just
+completing the pattern that we gave it in the prompt. As another example,
+here's a few shot prompt to convert Python
+code snippets to JavaScript. Our prompt starts
+with an instruction, then we have some examples,
+and finally, the Python code we actually want converted. The very last part
+of this prompt is JavaScript colon
+because we want to nudge the model to output
+some JavaScript code just like this. SPEAKER 1: Note that
+in a real application, we probably want to parameterize
+the input instead of hard coding it into the prompt. That way, our users can
+provide the Python code that they want converted. And this is essentially how
+you would customize an LLM for a Python to JavaScript app. SPEAKER 2: Now, you
+might be wondering what the absolute best way
+to write a model prompt is. And if so, we've got
+some bad news for you. SPEAKER 1: There's
+currently no optimal way to write model
+prompts, and that's because the results we get
+are so highly dependent on the underlying model. Sometimes small changes in
+wording or even in word order can improve the LLM's outputs
+in ways that are not always predictable. SPEAKER 2: That's
+why it's always worth trying out lots of different
+structures and examples and formats and seeing what
+works best for your use case. SPEAKER 1: There you have it. That's the magic of
+LLMs in a nutshell. SPEAKER 2: You can check
+out Bard at bard.google.com, and definitely let us
+know in the comments below what you're
+building with LLMs. [MUSIC PLAYING]

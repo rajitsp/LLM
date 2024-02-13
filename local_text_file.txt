@@ -1,0 +1,589 @@
+
+Search
+Write
+Sign up
+
+Sign in
+
+
+
+Fine-tune and deploy an LLM on Google Colab Notebook with QLoRA and VertexAI
+An example of fine-tuning and deploying MistralAI 7B model using QLoRA on your data in Google Colab notebook with VertexAI.
+Hugo Fernandez
+Hugo Fernandez
+
+·
+Follow
+
+13 min read
+·
+Dec 4, 2023
+9
+
+
+
+
+Introduction
+The recent emergence of fine-tuning methods such as QLoRA that can run on a single GPU has made this approach much more accessible. It is now possible to fine-tune smaller LLM on one’s own dataset without the need for a complex infrastructure spread across multiple GPUs. If you want to try to fine-tune a model and then deploy it for a test application before considering larger scale deployment, this article is for you!
+
+General architecture
+In this article we will cover everything from loading the model to deploying the endpoint where your model will be accessible for your applications.
+
+
+High level schema of the steps that will be covered in this article.
+We will start by loading the model and quantize it using BitsAndBytes package from HuggingFace. Then we will use QLoRA, that help us fine-tune LoRA adaptater on top of frozen quantize model. Thanks to the use of 4bits model we will be able to run training on a single GPUs. Finally we will save the model, export it to Vertex AI and deploy it.
+
+I chose to work with Google Colab because of its easy access to high-performance GPUs and TPUs, enabling me to efficiently perform data science tasks and train large language models. It is also easier to use Colab for some tests on your own personal dataset (or publicly available dataset) thanks to its great readability, and it makes debugging much easier.
+
+The Fine-tuning can be done using a free Colab instance, but saving the model require the high-ram option (for now).
+
+Creating you Google Cloud account is pretty easy, it will come with a 300$ free credit (at time of speaking), and will give you access to services such a Vertex AI, Model registry and model garden which offers a scalable, managed services for deploying large language models, providing robust infrastructure, easy integration with machine learning workflows, and streamlined model management and monitoring. This makes it an efficient and reliable choice for deploying LLMs.
+
+Fine-tuning with QLoRA
+To achieve our goal, namely to fine-tune a model on a single GPU, we will need to quantize it. This means taking its weights, which are in a float32 format, and reducing them to a smaller format, here 4 bits. Then, for training, we will use QLORA, which is a quantized version of LoRA (see here). With QLoRA, we freeze the quantize weights of the base model and perform backpropagation only on the weights of a lower-rank matrix that overlays the base model.
+
+
+LoRA illustration : only matrix A and B are trained and they contained much less parameter than the original model.
+The advantage is that the number of weights trained is much lower than the number of weights in the base model, while still maintaining a good level of accuracy.
+
+Moreover the Quantize model takes much less space on the RAM than the original one (MistralIA 7B model pass from ~24GB to just 4GB!) , meaning that you can run it on a powerful local machine or on a free google Coalb instance.
+
+To do this, we will install all the necessary packages.
+
+! pip install bitsandbytes transformers peft accelerate 
+! pip install datasets trl ninja packaging
+# Uncomment only if you're using A100 GPU
+#!pip install flash-attn --no-build-isolation
+import torch
+import os
+import sys
+import json
+import IPython
+from datetime import datetime
+from datasets import load_dataset
+from peft import LoraConfig, PeftModel, prepare_model_for_kbit_training, get_peft_model
+from transformers import (
+    AutoModelForCausalLM,
+    AutoTokenizer,
+    BitsAndBytesConfig,
+    AutoTokenizer,
+    TrainingArguments,
+)
+from trl import SFTTrainer
+If you are using an A100 GPU, you can additionally utilize an optimization called Flash attention (see here), which further accelerates the training process.
+
+For the model selection, you can opt for models that have up to about 20 billion parameters (see here) beyond that, you will have to get a better GPU. I have chosen as the base model the 7B model from MistralAI, which shows very good performance compared to other models of its size, and even manages to outperform larger language models like Llama 2 13B. (more details on the paper they release here).
+
+To facilitate easy use in Google Colab and avoid Out-Of-Memory (OOM) errors, I have created a version with more shards, which allows the model to be loaded into the free version of Colab without saturating the RAM (see https://huggingface.co/Hugofernandez/Mistral-7B-v0.1-colab-sharded). For the tokenizer we can use the default one from MistralAI.
+
+# Chose the base model you want
+model_name = "Hugofernandez/Mistral-7B-v0.1-colab-sharded"
+# set device
+device = 'cuda'
+#v Tokenizer
+tokenizer = AutoTokenizer.from_pretrained(model_name, use_fast=True)
+# We redefine the pad_token and pad_token_id with out of vocabulary token (unk_token)
+tokenizer.pad_token = tokenizer.unk_token
+tokenizer.pad_token_id = tokenizer.unk_token_id
+Next, we create the Quantization parameters using the most optimal values: by loading the model in 4 bits, using the NF4 format (4-bit NormalFloat (NF4), a new data type that is optimal for normally distributed weight), and by using double quantization which allows for further memory savings. However, for computations, these can only be performed in float16 or bfloat16 depending on the GPU, so they will be converted during calculation and then reconverted into the compressed format.
+
+#Quantization as defined https://huggingface.co/docs/optimum/concept_guides/quantization will help us reduce the size of the model for it to fit on a single GPU 
+#Quantization configuration
+compute_dtype = getattr(torch, "float16")
+print(compute_dtype)
+bnb_config = BitsAndBytesConfig(
+        load_in_4bit=True,
+        bnb_4bit_quant_type="nf4",
+        bnb_4bit_compute_dtype=compute_dtype,
+        bnb_4bit_use_double_quant=True,
+)
+Next, we load the model and quantize it on the fly using the previous configuration. If you have a GPU that is compatible with flash attention, set it to True. We force the device map to load the model on our GPU.
+
+#Load the model and quantize it
+model = AutoModelForCausalLM.from_pretrained(
+          model_name, 
+          quantization_config=bnb_config, 
+          use_flash_attention_2 = False, #set to True you're using A100
+          device_map={"": 0}, #device_map="auto" will cause a problem in the training 
+
+)
+We can then verify that our model has been successfully loaded and that the tensor format is indeed Linear4bit, and that the model is ready to be trained.
+
+print(model)
+#You can see that all the layers are Linear4bit 
+MistralForCausalLM(
+  (model): MistralModel(
+    (embed_tokens): Embedding(32000, 4096)
+    (layers): ModuleList(
+      (0-31): 32 x MistralDecoderLayer(
+        (self_attn): MistralAttention(
+          (q_proj): Linear4bit(in_features=4096, out_features=4096, bias=False)
+          (k_proj): Linear4bit(in_features=4096, out_features=1024, bias=False)
+          (v_proj): Linear4bit(in_features=4096, out_features=1024, bias=False)
+          (o_proj): Linear4bit(in_features=4096, out_features=4096, bias=False)
+          (rotary_emb): MistralRotaryEmbedding()
+        )
+...
+We also notice the names of the different elements of the models (MistralDecoderLayer, MistralRotaryEmbedding, etc.). Next, we define the learning parameters of LoRA. We set the rank r, which is the rank each matrix should have. The higher this rank, the greater the number of weights in the lower-rank matrices. We set it to 16 for this example, but you can increase it if the performance is not satisfactory, or decrease it to reduce the number of trainable parameters. The dropout rate corresponds to the proportion of weights that should be set to 0 during training to make the network more robust and to prevent overfitting.
+
+The target_modules corresponds to the names of modules that appear when we printed the model (q_proj, k_proj, v_proj, etc.). If you are using a different model, replace this line with the list of modules you want to target. The more modules you target, the more parameter you will have to train.
+
+peft_config = LoraConfig(
+        lora_alpha=16,
+        lora_dropout=0.05,
+        r=16,
+        bias="none",
+        task_type="CAUSAL_LM",
+        target_modules= ['k_proj', 'q_proj', 'v_proj', 'o_proj', "gate_proj", "down_proj", "up_proj", "lm_head",]
+)
+#Cast some modules of the model to fp32 
+model = prepare_model_for_kbit_training(model)
+#Configure the pad token in the model
+model.config.pad_token_id = tokenizer.pad_token_id
+model.config.use_cache = False # Gradient checkpointing is used by default but not compatible with caching
+Finally, we define the training arguments.
+
+training_arguments = TrainingArguments(
+        output_dir="./results", # directory in which the checkpoint will be saved. 
+        evaluation_strategy="epoch", # you can set it to 'steps' to eval it every eval_steps 
+        optim="paged_adamw_8bit", #used with QLoRA
+        per_device_train_batch_size=4, #batch size 
+        per_device_eval_batch_size=4, #same but for evaluation 
+        gradient_accumulation_steps=1, #number of lines to accumulate gradient, carefull because it changes the size of a "step".Therefore, logging, evaluation, save will be conducted every gradient_accumulation_steps * xxx_step training example
+        log_level="debug", #you can set it to  ‘info’, ‘warning’, ‘error’ and ‘critical’ 
+        save_steps=500, #number of steps between checkpoints 
+        logging_steps=20, #number of steps between logging of the loss for monitoring adapt it to your dataset size
+        learning_rate=4e-4, #you can try different value for this hyperparameter
+        num_train_epochs=1,
+        warmup_steps=100,
+        lr_scheduler_type="constant",
+)
+You can adjust the batch size depending on the size of the model and the GPU at your disposal (the resource tab on Colab will provide this information). Your goal here is to define batch sizes that maximize GPU usage without exceeding it.
+
+For the optimizer, we use the Paged Optimizer provided by QLoRA. Paged optimizer is a feature provided by Nvidia to move paged memory of optimizer states between the CPU and GPU. It is mainly used here to manage memory spikes and avoid out-of-memory errors.
+
+Set a low learning rate because we want to stay close to the original model.
+
+Here we define the number of epoch to 1 but to obtain a pretty good result you should go for 3/4 epoch on your data.
+
+Importing Dataset
+For this part, you can either import a Dataset already available on HuggingFace (the list is here: https://huggingface.co/datasets).
+
+If your use-case revolves around creating a chatbot or improving one, be careful to properly format your data, following the Template that was used to train the model (especially if you fine-tune instruct/chat models), so that the model can correctly learn from your data.
+
+To do this, you can either retrieve the chat template used for this model with the function apply_chat_template and then reformat your data accordingly, or apply this function directly to your data.
+
+Make sure to properly load the formatted data into a column and specify the name of this column in dataset_text_field in the trainer’s parameters. The training will only use this column, so you can delete all others.
+
+Don’t forget to add a validation set that will be used to calculate the error during training.
+
+# First import your own dataset in the default folder which "content" on colab
+# The dataset should have one column named "text" with one example per line 
+data_files = {'train': "/content/train.csv", 'test': "/content/test.csv"}
+dataset = load_dataset('csv', data_files=data_files)
+# Verify the chat template and apply it to you data 
+# tokenizer.apply_chat_template(chat, tokenize=False) 
+# Otherwise you can use dataset that are present on https://huggingface.co/datasets
+# dataset = load_dataset({DATASET_PATH})
+You can check that your data respects the correct format before launching the training.
+
+print(data_files)
+Training and saving the model
+Let’s get started, you can now launch the training.
+
+Define your Trainer with the tokenizer, training and evaluation set, the peft config, and the training arguments defined previously.
+
+trainer = SFTTrainer(
+        model=model,
+        train_dataset=dataset['train'],
+        eval_dataset=dataset['test'],
+        peft_config=peft_config,
+        dataset_text_field="text",
+        #packing = True
+        #max_seq_length=512,
+        tokenizer=tokenizer,
+        args=training_arguments,
+)
+If you have many short examples in your training set, an efficient way to train is to use packing. Packing employs ConstantLengthDataset to pack several short examples into the same input sequence. To define the length of that sequence, you can use the max_seq_length parameter.
+
+Before launching the training, you can check the number of trainable parameters and the proportion they represent compared to the total number of parameters.
+
+def print_trainable_parameters(model):
+    """
+    Prints the number of trainable parameters in the model.
+    """
+    trainable_params = 0
+    all_param = model.num_parameters()
+    for _, param in model.named_parameters():
+        if param.requires_grad:
+            trainable_params += param.numel()
+    print(
+        f"trainable params: {trainable_params} || all params: {all_param} || trainable%: {100 * trainable_params / all_param}"
+    )
+print_trainable_parameters(model)
+Optionnaly, you can initiate a preliminary “cold” evaluation before starting the training.
+
+# Run an evaluation step 
+trainer.evaluate()
+# Launch the training
+trainer.train()
+Once the training is complete, you can conduct a few tests to see if the response meets your expectations and consider retraining if the result is not satisfactory.
+
+#trainer.evaluate()
+eval_prompt = """<s>[INST]What is a Neural Network, and how does it work?[/INST]"""
+
+# import random
+model_input = tokenizer(eval_prompt, return_tensors="pt").to("cuda")
+
+model.eval()
+with torch.no_grad():
+    print(tokenizer.decode(model.generate(**model_input, max_new_tokens=256, pad_token_id=2)[0], skip_special_tokens=True))
+model.train()
+Once you are satisfied with the result, you can save the model:
+
+new_model = 'MistralAI_QLORA'
+trainer.model.save_pretrained(new_model)
+The model saved here is just the adapter that we trained earlier and does not contain the entire model. For deployment, we need the complete model with theoriginal weights and the adaptater that we trained. Therefore we need to merge the weights. For now, the direct saving of a 4-bit model is not yet supported (see the issue here) but should be available soon.
+
+In the meantime, we need to reload the base model (for this step, you will need a lot of RAM and an environment with high memory capacity):
+
+#Load the base model
+base_model = AutoModelForCausalLM.from_pretrained(model_name)
+Next, we will load it with the Peft model and apply the merge_and_unload method to merge the weights.
+
+peft_model = PeftModel.from_pretrained(base_model, new_model)
+merged_model = peft_model.merge_and_unload()
+Then we define a directory and save the merged model as well as the tokenizer. (Don’t forget to save the tokenizer in the same directory as the model because we will need it during the deployment phase)
+
+output_merged_dir = "/content/MistralAI_finetuned"
+
+os.makedirs(output_merged_dir, exist_ok=True)
+merged_model.save_pretrained(output_merged_dir, safe_serialization = False)
+tokenizer.save_pretrained(output_merged_dir)
+Deployment
+There are several prerequisites for this part.
+
+First, you must have created a GCP (Google Cloud Platform) account.
+
+Once your account is open, you will need to create a project and a service account within this project, in the IAM section. Then go to the service account tab on the right and create a service account with the name you want. Then add two roles : Vertex AI User and Storage Object Admin.
+
+Then, you will need to activate the Vertex AI APIs to interact directly with the service from the notebook. Go the service Vertex AI and click on enable recommended API.
+
+Finally, you will need to create a bucket in your storage space. Go to the bucket page and create an empty bucket.
+
+Returning to the notebook, new packages need to be installed to interact directly with Vertex AI:
+
+! pip3 install --upgrade google-cloud-aiplatform
+! pip3 install ipython pandas[output_formatting] google-cloud-language==2.10.0
+The installation of these packages requires restarting the kernel. Make sure you have saved your model in the previous step before executing this cell, as you will lose all your environment variables.
+
+# Restart the notebook kernel after installs.
+app = IPython.Application.instance()
+app.kernel.do_shutdown(True)
+We re-import the packages that we will need:
+
+import os
+from google.cloud import aiplatform, language, storage
+from google.colab import auth as google_auth
+We define the variables corresponding to our project: Project ID, the region in which we want to deploy (choose the region closest to you), the service account that has write permissions, and the name of the bucket that you created previously. Give a name to the folder that will contain your model and to the staging folder as well.
+
+# Cloud project id.
+PROJECT_ID = "{PROJECT_ID}"
+
+# Region for launching jobs.
+REGION = "{REGION}"
+
+# Cloud Storage bucket for storing experiments output.
+# Start with gs:// prefix, e.g. gs://foo_bucket.
+BUCKET_URI = "gs://{YOUR_BUCKET_NAME}"
+
+BASE_MODEL_BUCKET = os.path.join(BUCKET_URI, "final_merged_mistral")
+STAGING_BUCKET = os.path.join(BUCKET_URI, "staging")
+
+# The service account looks like:
+# '@.iam.gserviceaccount.com'
+# Please go to https://cloud.google.com/iam/docs/service-accounts-create#iam-service-accounts-create-console
+# and create service account with `Vertex AI User` and `Storage Object Admin` roles.
+# The service account for deploying fine tuned model.
+SERVICE_ACCOUNT = "{YOUR_SERVICE_ACCOUNT}"
+You can then authenticate yourself; a window will open and ask for your credentials to log into your GCP account.
+
+google_auth.authenticate_user()
+You can then configure the project id and initialize the Google package using the command line.
+
+! gcloud config set project $PROJECT_ID
+! gcloud services enable language.googleapis.com
+aiplatform.init(project=PROJECT_ID, location=REGION, staging_bucket=STAGING_BUCKET)
+Before adding the model to the Model Registry, you first need to upload it to your bucket on Google Cloud Storage. It is from this bucket that you will be able to add the model to the Model Registry and deploy it. This command will copy all the files of the model and the Tokenizer to add them to your bucket.
+
+# Upload the directory to Google Cloud Storage
+!gsutil -m cp -r {output_merged_dir} {BASE_MODEL_BUCKET}
+It can takes some times base on the size of your model.
+
+We define a Docker image that will be reused later to serve our application. This is an image using PyTorch serve. Feel free to use a more recent image if it’s available.
+
+PREDICTION_DOCKER_URI = "us-docker.pkg.dev/vertex-ai/vertex-vision-model-garden-dockers/pytorch-peft-serve:20231026_1907_RC00"
+We define a function that will handle the deployment (see sources). It starts by creating an endpoint, then uploads the model using the previously specified image and incorporates our main variables. This model will then be available in the model registry, and you can manually deploy it later if needed. Finally, this function deploys the model on the previously defined endpoint.
+
+def deploy_model(
+    model_name: str,
+    base_model_id: str,
+    finetuned_lora_model_path: str,
+    service_account: str,
+    precision_loading_mode: str = "float16",
+    machine_type: str = "n1-standard-8",
+    accelerator_type: str = "NVIDIA_TESLA_V100",
+    accelerator_count: int = 1,
+) -> tuple[aiplatform.Model, aiplatform.Endpoint]:
+    """Deploys trained models into Vertex AI."""
+    endpoint = aiplatform.Endpoint.create(display_name=f"{model_name}-endpoint")
+    serving_env = {
+        "BASE_MODEL_ID": base_model_id,
+        "PRECISION_LOADING_MODE": precision_loading_mode,
+    }
+    if finetuned_lora_model_path:
+        serving_env["FINETUNED_LORA_MODEL_PATH"] = finetuned_lora_model_path
+    model = aiplatform.Model.upload(
+        display_name=model_name,
+        serving_container_image_uri=PREDICTION_DOCKER_URI,
+        serving_container_ports=[7080],
+        serving_container_predict_route="/predictions/peft_serving",
+        serving_container_health_route="/ping",
+        serving_container_environment_variables=serving_env,
+    )
+    model.deploy(
+        endpoint=endpoint,
+        machine_type=machine_type,
+        accelerator_type=accelerator_type,
+        accelerator_count=accelerator_count,
+        deploy_request_timeout=1800,
+        service_account=service_account,
+    )
+    return model, endpoint
+For deployment, you can customize the type of machine and accelerator (i.e., the GPU) you want to use. I used a V100, but depending on your budget and availability, you can choose the next level up (A100) or down (T4) and specify their number (here one will be sufficient given the size of the model). You can consult the price ranges for your region on this page (https://cloud.google.com/vertex-ai/pricing?hl=fr). At the time of writing this article, the P100 was about 7 times more expensive than a T4, and the A100 about 8.5 times more expensive. So use the accelerator that will suit you at better cost.
+
+# Sets V100 (16G) to deploy MistralAI 7B models.
+# V100 serving has better throughput and latency performance than L4/T4 serving.
+machine_type = "n1-standard-8"
+accelerator_type = "NVIDIA_TESLA_V100"
+accelerator_count = 1
+Next, we define the name of the model and its version (for better management in the Model Registry) and execute the function.
+
+precision_loading_mode = "float16"
+model_name = "MistralIA_finetuned" # give any name you want 
+version = "1" # you can increment this number each time you want to do a new deployment 
+
+model_vertex, endpoint_vertex = deploy_model(
+    model_name=model_name+version,
+    base_model_id=BASE_MODEL_BUCKET,
+    finetuned_lora_model_path="",  # This will avoid override finetuning models.
+    service_account=SERVICE_ACCOUNT,
+    precision_loading_mode=precision_loading_mode,
+    machine_type=machine_type,
+    accelerator_type=accelerator_type,
+    accelerator_count=accelerator_count,
+)
+print("endpoint_name:", endpoint_vertex.name)
+This deployment can take quite some time (sometimes several tens of minutes), and once it is completed, the endpoint may take some time before becoming available (due to loading time on the machine, etc.). If you encounter errors, wait a bit before retrying and consult the endpoint logs directly if the problem persists.
+
+We then test our endpoint to see if it responds:
+
+instances = [
+    {
+        "prompt": "What is a Neural Network, and how does it work?",
+        "max_tokens": 500,
+        "temperature": 1,
+        "top_p": 1.0,
+        "top_k": 10,
+    },
+]
+response = endpoint_vertex.predict(instances=instances)
+print(response)
+And there you have it!
+
+You can now go to the Model Registry tab in Vertex AI to see your model, and to the Online Prediction section to view your endpoint and test it.
+
+Conclusion and Discussion
+This article has outlined a straightforward method to implement a model from end to end for fine-tuning and deploying models on Google Cloud. It represents a first approach and a good way to start fine-tuning model and testing it in an application.
+
+Although it may not fit all requirements and other solutions may exists. Alternative approaches, such as employing Workbench within Vertex AI as a substitute for Google Colab, or selecting diverse models tailored to specific use cases, are also viable options.
+
+Nevertheless, I hope this demonstration has aided you in your exploration and learning within the field of generative AI.
+
+Sources:
+
+https://github.com/artidoro/qlora/tree/main
+
+https://huggingface.co/blog/4bit-transformers-bitsandbytes
+
+https://colab.research.google.com/drive/1VoYNfYDKcKRQRor98Zbf2-9VQTtGJ24k?usp=sharing
+
+https://colab.research.google.com/drive/1VoYNfYDKcKRQRor98Zbf2-9VQTtGJ24k?usp=sharing#scrollTo=gkIcwsSU01EB
+
+https://huggingface.co/docs/transformers/main/en/chat_templating
+
+https://arxiv.org/pdf/2305.14314.pdf
+
+https://huggingface.co/docs/trl/sft_trainer
+
+https://huggingface.co/docs/peft/conceptual_guides/lora
+
+https://github.com/GoogleCloudPlatform/vertex-ai-samples/blob/main/notebooks/community/model_garden/model_garden_pytorch_llama2_peft.ipynb
+
+https://github.com/GoogleCloudPlatform/vertex-ai-samples/blob/main/notebooks/community/model_garden/model_garden_pytorch_mistral.ipynb
+
+https://cloud.google.com/vertex-ai/pricing?hl=fr
+
+Artificial Intelligence
+Google Cloud Platform
+API
+Fine Tuning
+Large Language Models
+9
+
+
+
+Hugo Fernandez
+Written by Hugo Fernandez
+2 Followers
+Data scientist at Publicis Sapient
+
+Follow
+
+More from Hugo Fernandez
+Hugo Fernandez
+Hugo Fernandez
+
+in
+
+Publicis Sapient France
+
+What Is RetNet ? could it challenge the dominance of the Transformer ?
+Microsoft recently published an article introducing a new architecture for large language models (LLMs) called the Retentive Network. This…
+5 min read
+·
+Nov 26, 2023
+What Is RetNet ? could it challenge the dominance of the Transformer ?
+See all from Hugo Fernandez
+Recommended from Medium
+Fine Tune Large Language Model (LLM) on a Custom Dataset with QLoRA
+Suman Das
+Suman Das
+
+Fine Tune Large Language Model (LLM) on a Custom Dataset with QLoRA
+The field of natural language processing has been revolutionized by large language models (LLMs), which showcase advanced capabilities and…
+15 min read
+·
+Jan 24, 2024
+378
+
+4
+
+Finetuning Llama 2 and Mistral
+Geronimo
+Geronimo
+
+Finetuning Llama 2 and Mistral
+A beginner’s guide to finetuning LLMs with QLoRA
+17 min read
+·
+Nov 5, 2023
+498
+
+14
+
+Lists
+
+
+A phone with a tweet on it describing a deepfake video of the Ukrainian president, with a labeled fake image in the background
+AI Regulation
+6 stories
+·
+314 saves
+
+
+
+Natural Language Processing
+1187 stories
+·
+662 saves
+
+AI-generated image of a cute tiny robot in the backdrop of ChatGPT’s logo
+
+ChatGPT
+21 stories
+·
+459 saves
+
+
+
+Generative AI Recommended Reading
+52 stories
+·
+714 saves
+Mistral-7B: A Step-by-Step guide on how to finetune a Large Language Model into a Medical Chat…
+Sachin Khandewal
+Sachin Khandewal
+
+Mistral-7B: A Step-by-Step guide on how to finetune a Large Language Model into a Medical Chat…
+An example image from my Github repo https://github.com/sachink1729/Finetuning-Mistral-7B-Chat-Doctor-Huggingface-LoRA-PEFT
+11 min read
+·
+Dec 16, 2023
+107
+
+Mistral-7B Fine-Tuning: A Step-by-Step Guide
+Gathnex
+Gathnex
+
+Mistral-7B Fine-Tuning: A Step-by-Step Guide
+Introducing Mistral 7B: The Powerhouse of Language Models
+5 min read
+·
+Oct 4, 2023
+365
+
+12
+
+Fine-Tuning Llama in practices
+Luc Nguyen
+Luc Nguyen
+
+Fine-Tuning Llama in practices
+6 min read
+·
+5 days ago
+3
+
+A Beginner’s Guide to Fine-Tuning Mistral 7B Instruct Model
+Adithya S K
+Adithya S K
+
+A Beginner’s Guide to Fine-Tuning Mistral 7B Instruct Model
+Fine-Tuning for Code Generation Using a Single Google Colab Notebook
+8 min read
+·
+Oct 6, 2023
+368
+
+15
+
+See more recommendations
+Help
+
+Status
+
+About
+
+Careers
+
+Blog
+
+Privacy
+
+Terms
+
+Text to speech
+
+Teams
+
